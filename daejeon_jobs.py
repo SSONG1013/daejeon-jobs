@@ -20,6 +20,7 @@ import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 import html as htmllib
+import re
 from pathlib import Path
 
 import requests
@@ -159,7 +160,7 @@ def save_seen(ids: set):
     SEEN_PATH.write_text(json.dumps(sorted(ids), ensure_ascii=False), encoding="utf-8")
 
 
-def write_excel(items: list[dict], new_ids: set):
+def write_excel(items: list[dict], new_ids: set, gri: list[dict] = ()):
     today = today_kst()
     wb = Workbook()
     ws = wb.active
@@ -217,13 +218,39 @@ def write_excel(items: list[dict], new_ids: set):
     ws.freeze_panes = "A4"
     ws.auto_filter.ref = f"A3:I{max(ws.max_row, 3)}"
 
+    ws2 = wb.create_sheet("정부출연연구기관")
+    ws2["A1"] = f"대전 정부출연연구기관 채용공고 (NST 게시판, 최근 {NST_DAYS}일 등록분 {len(gri)}건) · 마감일은 공고문 확인"
+    ws2["A1"].font = Font(bold=True, size=13)
+    ws2.append([])
+    ws2.append(["신규", "채용기관명", "채용 직무 분야(제목 기준)", "등록일", "서류 마감일", "공고 제목", "공고 링크"])
+    for c in ws2[3]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = head_fill
+        c.alignment = Alignment(horizontal="center", vertical="center")
+    for it in gri:
+        is_new = it["id"] in new_ids
+        ws2.append(["NEW" if is_new else "", it["기관명"], it["직무분야"],
+                    it["등록일"].strftime("%Y-%m-%d") if it["등록일"] else "", "공고문 확인", it["공고제목"], it["링크"]])
+        row = ws2.max_row
+        if is_new:
+            for c in ws2[row]:
+                c.fill = new_fill
+        if it["링크"]:
+            ws2.cell(row, 7).hyperlink = it["링크"]
+            ws2.cell(row, 7).style = "Hyperlink"
+        for c in ws2[row]:
+            c.alignment = Alignment(vertical="center", wrap_text=True)
+    for i, w in enumerate([7, 26, 28, 12, 13, 55, 45], 1):
+        ws2.column_dimensions[get_column_letter(i)].width = w
+    ws2.freeze_panes = "A4"
+
     try:
         wb.save(EXCEL_PATH)
     except PermissionError:
         sys.exit(f"[오류] 엑셀 파일이 열려 있어 저장할 수 없습니다. 파일을 닫고 다시 실행하세요: {EXCEL_PATH}")
 
 
-def write_html(items: list[dict], new_ids: set):
+def write_html(items: list[dict], new_ids: set, gri: list[dict] = (), gri_error: str = ""):
     """모바일에서도 보기 좋은 검색 가능한 웹페이지 생성"""
     today = today_kst()
     esc = lambda x: htmllib.escape(str(x or ""))
@@ -247,6 +274,19 @@ def write_html(items: list[dict], new_ids: set):
             f'<td data-l="서류마감" class="end">{end_txt} <span class="dd">{dday_txt}</span></td>'
             f'<td data-l="공고">{title}<div class="sub">{" · ".join(esc(x) for x in (it["고용형태"], it["채용구분"]) if x)}</div></td></tr>'
         )
+    grows = []
+    for it in gri:
+        new = '<span class="new">NEW</span>' if it["id"] in new_ids else ""
+        grows.append(
+            f'<tr><td data-l="기관명"><b>{esc(it["기관명"])}</b> {new}</td>'
+            f'<td data-l="직무분야">{esc(it["직무분야"])}</td>'
+            f'<td data-l="서류마감" class="end">공고문 확인<div class="sub">등록 {it["등록일"]:%Y-%m-%d}</div></td>'
+            f'<td data-l="공고"><a href="{esc(it["링크"])}" target="_blank" rel="noopener">{esc(it["공고제목"])}</a></td></tr>'
+        )
+    if gri_error:
+        gri_body = '<tr><td colspan="4">오늘은 출연연 공고를 불러오지 못했습니다. 내일 다시 갱신됩니다.</td></tr>'
+    else:
+        gri_body = chr(10).join(grows) if grows else '<tr><td colspan="4">최근 등록된 공고가 없습니다.</td></tr>'
     page = f"""<!DOCTYPE html>
 <html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -269,6 +309,7 @@ td a{{color:var(--b);text-decoration:none}} td a:hover{{text-decoration:underlin
 .end{{white-space:nowrap}} .dd{{color:var(--mut);font-size:12px}}
 tr.urgent .end,tr.urgent .dd{{color:#c00000;font-weight:700}}
 tr.soon .dd{{color:#b45309;font-weight:600}}
+h2{{font-size:17px;margin:28px 0 4px}} .cnt{{font-size:13px;color:var(--mut);font-weight:400}}
 .new{{background:#f59e0b;color:#fff;font-size:11px;padding:1px 6px;border-radius:9px;margin-left:4px}}
 @media (max-width:700px){{
  thead{{display:none}} table,tbody,tr,td{{display:block;width:100%}}
@@ -277,40 +318,139 @@ tr.soon .dd{{color:#b45309;font-weight:600}}
  td::before{{content:attr(data-l);display:inline-block;width:64px;color:var(--mut);font-size:12px}}
 }}
 </style></head><body>
-<header><h1>대전 공공기관·공기업 채용공고</h1>
-<div class="meta">갱신 {now_kst():%Y-%m-%d %H:%M} · 접수 중 {len(items)}건 · 신규 {len(new_ids)}건 · 매일 오전 8시 자동 갱신 · <a href="{EXCEL_NAME}">엑셀 다운로드</a></div></header>
+<header><h1>대전 공공기관·공기업·출연연 채용공고</h1>
+<div class="meta">갱신 {now_kst():%Y-%m-%d %H:%M} · 공공기관 {len(items)}건 · 출연연 {len(gri)}건 · 신규 {len(new_ids)}건 · 매일 오전 8시 자동 갱신 · <a href="{EXCEL_NAME}">엑셀 다운로드</a></div></header>
 <div class="wrap">
 <input id="q" placeholder="기관명, 직무분야, 공고 제목으로 검색 (예: 연구, 정보통신, 원자력)">
+<h2 style="margin-top:4px">공공기관·공기업 <span class="cnt">{len(items)}건</span></h2>
 <table><thead><tr><th>채용기관명</th><th>채용 직무 분야</th><th>서류 마감일</th><th>공고 제목</th></tr></thead>
-<tbody id="tb">
+<tbody class="tb">
 {chr(10).join(rows) if rows else '<tr><td colspan="4">현재 접수 중인 공고가 없습니다.</td></tr>'}
 </tbody></table>
 <p class="sub">출처: 공공데이터포털 기획재정부 공공기관 채용정보(잡알리오) · 근무지 대전 · 마감 임박순</p>
+<h2>정부출연연구기관 <span class="cnt">{len(gri)}건</span></h2>
+<p class="sub">원자력연·ETRI·기초지원연 등 대전 소재 과학기술 출연연 · 국가과학기술연구회(NST) 게시판 최근 {NST_DAYS}일 등록분 · 최신순<br>
+마감일은 기관별 공고문(PDF)에만 있어 링크에서 확인해 주세요. 직무 분야는 공고 제목으로 분류한 참고용입니다.</p>
+<table><thead><tr><th>채용기관명</th><th>채용 직무 분야</th><th>서류 마감일</th><th>공고 제목</th></tr></thead>
+<tbody class="tb">
+{gri_body}
+</tbody></table>
 </div>
 <script>
-const q=document.getElementById('q'),rs=[...document.querySelectorAll('#tb tr')];
+const q=document.getElementById('q'),rs=[...document.querySelectorAll('.tb tr')];
 q.addEventListener('input',()=>{{const v=q.value.trim().toLowerCase();rs.forEach(r=>r.style.display=!v||r.textContent.toLowerCase().includes(v)?'':'none')}});
 </script>
 </body></html>"""
     HTML_PATH.write_text(page, encoding="utf-8")
 
 
+# ───────────────── 정부출연연구기관 (NST 게시판) ─────────────────
+# 과학기술 출연연은 2024년 공공기관 지정 해제로 잡알리오에 없음 →
+# 국가과학기술연구회(NST) '소관기관 채용공고' 게시판에서 따로 수집
+NST_LIST = "https://www.nst.re.kr/www/selectBbsNttList.do"
+NST_VIEW = "https://www.nst.re.kr/www/selectBbsNttView.do"
+NST_DAYS = 30   # 최근 며칠 이내 등록된 공고만 표시
+DAEJEON_GRI = {  # 본원이 대전에 있는 출연연
+    "한국기초과학지원연구원", "한국천문연구원", "한국생명공학연구원", "한국과학기술정보연구원",
+    "한국한의학연구원", "한국표준과학연구원", "한국기계연구원", "한국에너지기술연구원",
+    "한국화학연구원", "국가독성과학연구소", "안전성평가연구소", "한국원자력연구원",
+    "한국핵융합에너지연구원", "한국전자통신연구원", "국가보안기술연구소", "한국항공우주연구원",
+    "한국지질자원연구원", "국가수리과학연구소",
+}
+NOT_POSTING = re.compile(r"합격|결과|일정\s*변경|친인척|면접|취소|연기|정정")
+UA = {"User-Agent": "Mozilla/5.0 (daejeon-jobs; daily job list)"}
+
+
+def classify(title: str) -> str:
+    """공고 제목으로 고용형태/직종을 추정 (정확한 내용은 공고문 확인)"""
+    kinds = []
+    rules = [
+        (r"박사후|포닥|post-?doc", "박사후연구원"), (r"석사후", "석사후연구원"),
+        (r"위촉연구원", "위촉연구원"), (r"학생연구원|연구연수생|인턴", "인턴·학생연구원"),
+        (r"육아휴직|대체인력", "대체인력"), (r"기간제|계약직|비정규직", "계약직·기간제"),
+        (r"정규직|신입직원|경력직원", "정규직"),
+    ]
+    for pat, name in rules:
+        if re.search(pat, title, re.I) and name not in kinds:
+            kinds.append(name)
+    for pat, name in [(r"연구직", "연구직"), (r"기술직", "기술직"), (r"행정직", "행정직"), (r"장애인", "장애인 제한경쟁")]:
+        if re.search(pat, title):
+            kinds.append(name)
+    return ", ".join(kinds) if kinds else "공고문 참고"
+
+
+def fetch_nst() -> list[dict]:
+    from bs4 import BeautifulSoup
+    cutoff = today_kst() - timedelta(days=NST_DAYS)
+    items = []
+    for page in range(1, 15):
+        r = requests.get(NST_LIST, params={"bbsNo": 19, "key": 61, "pageIndex": page}, headers=UA, timeout=30)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        rows = soup.select("table tbody tr")
+        if not rows:
+            break
+        stop = False
+        for tr in rows:
+            for h in tr.select(".add-head"):
+                h.decompose()
+            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+            a = tr.find("a", href=True)
+            if len(cells) < 5 or not a:
+                continue
+            org, title, posted = cells[1], cells[2], parse_ymd(cells[4])
+            if posted and posted < cutoff:
+                stop = True
+                continue
+            m = re.search(r"nttNo=(\d+)", a["href"])
+            if not m or org not in DAEJEON_GRI or NOT_POSTING.search(title):
+                continue
+            items.append({"id": f"nst-{m.group(1)}", "ntt": m.group(1), "기관명": org,
+                          "공고제목": title, "직무분야": classify(title), "등록일": posted, "링크": ""})
+        if stop:
+            break
+    # 상세 페이지에서 기관 원문 링크 가져오기 (실패하면 NST 상세 페이지로)
+    for it in items:
+        nst_url = f"{NST_VIEW}?key=61&bbsNo=19&nttNo={it['ntt']}"
+        it["링크"] = nst_url
+        try:
+            r = requests.get(NST_VIEW, params={"key": 61, "bbsNo": 19, "nttNo": it["ntt"]}, headers=UA, timeout=20)
+            body = BeautifulSoup(r.text, "html.parser").select_one("article") or BeautifulSoup(r.text, "html.parser")
+            for u in re.findall(r"https?://[^\s\"'<>]+", htmllib.unescape(body.get_text(" "))):
+                if "nst.re.kr" not in u:
+                    it["링크"] = u
+                    break
+        except requests.RequestException:
+            pass
+        time.sleep(0.3)
+    items.sort(key=lambda x: (x["등록일"] or date.min), reverse=True)
+    return items
+
+
 def main():
     print("대전 지역 공공기관 채용공고 조회 중...")
     items = normalize(fetch_all())
+    try:
+        gri = fetch_nst()
+        gri_error = ""
+    except Exception as e:   # NST 사이트 문제여도 잡알리오 결과는 그대로 저장
+        gri, gri_error = [], str(e)
+        print(f"[경고] 출연연(NST) 공고 수집 실패: {e}")
 
     seen = load_seen()
-    current_ids = {it["id"] for it in items}
+    current_ids = {it["id"] for it in items} | {it["id"] for it in gri}
     new_ids = current_ids - seen if seen else set()   # 첫 실행 땐 전부 신규로 표시하지 않음
+    if seen and not any(str(x).startswith("nst-") for x in seen):
+        new_ids -= {it["id"] for it in gri}   # 출연연 첫 수집 때는 NEW 표시 안 함
 
-    write_excel(items, new_ids)
-    write_html(items, new_ids)
+    write_excel(items, new_ids, gri)
+    write_html(items, new_ids, gri, gri_error)
     save_seen(seen | current_ids)
 
-    print(f"완료: 총 {len(items)}건 (신규 {len(new_ids)}건) → {EXCEL_PATH}")
-    for it in items:
+    print(f"완료: 공공기관 {len(items)}건 + 출연연 {len(gri)}건 (신규 {len(new_ids)}건) → {EXCEL_PATH}")
+    for it in items + gri:
         if it["id"] in new_ids:
-            print(f"  [NEW] {it['기관명']} | {it['직무분야']} | 마감 {it['마감일']}")
+            print(f"  [NEW] {it['기관명']} | {it['직무분야']} | 마감 {it.get('마감일', '공고문 확인')}")
 
 
 if __name__ == "__main__":
