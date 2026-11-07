@@ -30,7 +30,8 @@ h2{font-size:17px;margin:28px 0 4px} .cnt{font-size:13px;color:var(--mut);font-w
 }
 </style></head><body>
 <header><h1>대전 공공기관·공기업·출연연 채용공고</h1>
-<div class="meta">갱신 2026-11-07 15:01 · 공공기관 56건 · 출연연 14건 · 신규 0건 · 매일 오전 8시 자동 갱신 · <a href="대전_공공기관_채용공고.xlsx">엑셀 다운로드</a></div></header>
+<div class="meta">갱신 2026-11-07 15:06 · 공공기관 56건 · 출연연 14건 · 신규 0건 · 매일 오전 8시 자동 갱신 · <a href="대전_공공기관_채용공고.xlsx">엑셀 다운로드</a></div>
+<div class="meta" id="visits">방문자 집계 중…</div></header>
 <div class="wrap">
 <input id="q" placeholder="기관명, 직무분야, 공고 제목으로 검색 (예: 연구, 정보통신, 원자력)">
 <h2 style="margin-top:4px">공공기관·공기업 <span class="cnt">56건</span></h2>
@@ -118,5 +119,18 @@ h2{font-size:17px;margin:28px 0 4px} .cnt{font-size:13px;color:var(--mut);font-w
 <script>
 const q=document.getElementById('q'),rs=[...document.querySelectorAll('.tb tr')];
 q.addEventListener('input',()=>{const v=q.value.trim().toLowerCase();rs.forEach(r=>r.style.display=!v||r.textContent.toLowerCase().includes(v)?'':'none')});
+
+// 방문자 수 (무료 카운터 abacus 사용, 같은 브라우저는 하루 1번만 집계)
+(async()=>{
+  const API='https://abacus.jasoncameron.dev', NS='ssong1013-daejeon-jobs';
+  const ymd=d=>new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Seoul'}).format(d).replaceAll('-','');
+  const today=ymd(new Date()), yday=ymd(new Date(Date.now()-864e5));
+  let first=true;
+  try{ first=!localStorage.getItem('djv-'+today); localStorage.setItem('djv-'+today,'1'); }catch(e){}
+  const val=async(act,key)=>{ try{ const r=await fetch(`${API}/${act}/${NS}/${key}`); if(!r.ok) return 0; return (await r.json()).value||0; }catch(e){ return null; } };
+  const [t,y,all]=await Promise.all([val(first?'hit':'get','d'+today), val('get','d'+yday), val(first?'hit':'get','total')]);
+  const el=document.getElementById('visits');
+  el.textContent = t===null ? '' : `오늘 방문자 ${t}명 · 어제 ${y}명 · 누적 ${all}명`;
+})();
 </script>
 </body></html>
